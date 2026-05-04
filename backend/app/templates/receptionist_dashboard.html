@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CareFlow Receptionist Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; }
+    .card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; }
+    .btn { border-radius: 8px; padding: 9px 12px; font-weight: 800; font-size: 14px; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-soft { background: #f1f5f9; color: #0f172a; }
+    .btn-ok { background: #dcfce7; color: #166534; }
+    .btn-warn { background: #fef3c7; color: #92400e; }
+    .btn-danger { background: #fee2e2; color: #991b1b; }
+    .input { width: 100%; border: 1px solid #cbd5e1; border-radius: 8px; padding: 11px 12px; }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900">
+  <main class="min-h-screen">
+    <section id="loginView" class="max-w-md mx-auto px-5 py-16">
+      <div class="card p-6 shadow-sm">
+        <div class="mb-6">
+          <p class="text-sm font-bold text-blue-700">CareFlow Staff</p>
+          <h1 class="text-2xl font-extrabold mt-1">Receptionist Dashboard</h1>
+          <p class="text-slate-500 mt-2">Sign in to manage appointments, payments, and queue tokens.</p>
+        </div>
+        <form id="loginForm" class="space-y-4">
+          <input id="email" class="input" type="email" placeholder="reception@hospital.com" required>
+          <input id="password" class="input" type="password" placeholder="Password" required>
+          <button class="btn btn-primary w-full" type="submit">Sign In</button>
+        </form>
+        <p id="loginError" class="hidden mt-4 text-sm font-semibold text-red-700"></p>
+        <a class="block mt-5 text-sm font-bold text-blue-700" href="/doctor-dashboard">Doctor dashboard</a>
+      </div>
+    </section>
+
+    <section id="dashboardView" class="hidden">
+      <header class="bg-white border-b border-slate-200">
+        <div class="max-w-7xl mx-auto px-5 py-4 flex items-center justify-between">
+          <div>
+            <p class="text-sm font-bold text-blue-700">Reception Portal</p>
+            <h1 class="text-2xl font-extrabold">Queue Desk</h1>
+          </div>
+          <div class="flex items-center gap-3">
+            <span id="staffName" class="text-sm font-semibold text-slate-600"></span>
+            <button id="refreshBtn" class="btn btn-soft" type="button">Refresh</button>
+            <button id="logoutBtn" class="btn btn-danger" type="button">Logout</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="max-w-7xl mx-auto px-5 py-6 grid grid-cols-1 xl:grid-cols-12 gap-5">
+        <section class="xl:col-span-8 card p-5">
+          <div class="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-5">
+            <div>
+              <h2 class="text-xl font-extrabold">Appointments</h2>
+              <p id="appointmentSummary" class="text-sm text-slate-500 mt-1">Loading appointments...</p>
+            </div>
+            <div class="flex gap-2">
+              <input id="dateFilter" class="input" type="date">
+              <button id="loadDateBtn" class="btn btn-primary" type="button">Load</button>
+            </div>
+          </div>
+          <div id="appointmentsList" class="space-y-3"></div>
+        </section>
+
+        <aside class="xl:col-span-4 space-y-5">
+          <section class="card p-5">
+            <h2 class="text-xl font-extrabold">Live Queue</h2>
+            <p id="queueSummary" class="text-sm text-slate-500 mt-1">Loading queue...</p>
+            <div id="queueList" class="mt-4 space-y-3"></div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const tokenKey = "careflow_receptionist_token";
+    const loginView = document.querySelector("#loginView");
+    const dashboardView = document.querySelector("#dashboardView");
+    const loginError = document.querySelector("#loginError");
+    const appointmentsList = document.querySelector("#appointmentsList");
+    const queueList = document.querySelector("#queueList");
+
+    function token() {
+      return localStorage.getItem(tokenKey);
+    }
+
+    function today() {
+      return new Date().toISOString().slice(0, 10);
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token()}`,
+          ...(options.headers || {})
+        }
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || data.message || "Request failed");
+      return data;
+    }
+
+    function showDashboard(user) {
+      loginView.classList.add("hidden");
+      dashboardView.classList.remove("hidden");
+      document.querySelector("#staffName").textContent = user?.full_name || "";
+      document.querySelector("#dateFilter").value = today();
+      refreshAll();
+      connectSocket();
+    }
+
+    let socket;
+    function connectSocket() {
+      if (socket || !token()) return;
+      socket = io({ auth: { token: token() } });
+
+      socket.on('connect', () => {
+        socket.emit('subscribe_queue', { role: 'receptionist' });
+      });
+
+      socket.on('new_token_in_queue', () => refreshAll());
+      socket.on('patient_called', () => refreshAll());
+      socket.on('appointment_completed', () => refreshAll());
+      socket.on('appointment_skipped', () => refreshAll());
+      socket.on('queue_state_changed', () => refreshAll());
+
+      socket.on('disconnect', () => { socket = null; });
+      socket.on('connect_error', (err) => { console.warn('Socket error', err); });
+    }
+
+    function disconnectSocket() {
+      if (socket) {
+        socket.disconnect();
+        socket = null;
+      }
+    }
+
+    async function boot() {
+      if (!token()) return;
+      try {
+        const data = await api("/api/auth/me");
+        if (data.role !== "receptionist") throw new Error("Receptionist role required");
+        showDashboard(data.user);
+      } catch (_err) {
+        localStorage.removeItem(tokenKey);
+      }
+    }
+
+    document.querySelector("#loginForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      loginError.classList.add("hidden");
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: document.querySelector("#email").value,
+            password: document.querySelector("#password").value
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Login failed");
+        if (data.user.role !== "receptionist") throw new Error("This portal requires a receptionist account");
+        localStorage.setItem(tokenKey, data.access_token);
+        showDashboard(data.user);
+      } catch (err) {
+        loginError.textContent = err.message;
+        loginError.classList.remove("hidden");
+      }
+    });
+
+    async function loadAppointments() {
+      appointmentsList.innerHTML = "<div class='text-slate-500'>Loading...</div>";
+      const date = document.querySelector("#dateFilter").value || today();
+      try {
+        const data = await api(`/api/receptionist/appointments?date=${encodeURIComponent(date)}`);
+        document.querySelector("#appointmentSummary").textContent = `${data.total} appointment(s) for ${date}`;
+        if (!data.appointments.length) {
+          appointmentsList.innerHTML = "<div class='p-4 bg-slate-50 rounded-lg text-slate-500'>No appointments for this date.</div>";
+          return;
+        }
+        appointmentsList.innerHTML = data.appointments.map((item) => appointmentCard(item)).join("");
+      } catch (err) {
+        appointmentsList.innerHTML = `<div class="p-4 bg-red-50 text-red-700 rounded-lg">${err.message}</div>`;
+      }
+    }
+
+    function appointmentCard(item) {
+      const paymentStatus = item.payment?.status || "no payment";
+      const tokenIssued = !!item.queue_token || !!item.queue_position;
+      return `
+        <article class="border border-slate-200 rounded-lg p-4 bg-slate-50">
+          <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+            <div>
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-xs font-extrabold bg-blue-100 text-blue-800 rounded px-2 py-1">${item.scheduled_time}</span>
+                <span class="text-xs font-extrabold bg-slate-200 rounded px-2 py-1">${item.status}</span>
+                <span class="text-xs font-extrabold bg-emerald-100 text-emerald-800 rounded px-2 py-1">${paymentStatus}</span>
+                ${tokenIssued ? "<span class='text-xs font-extrabold bg-purple-100 text-purple-800 rounded px-2 py-1'>Token issued</span>" : ""}
+              </div>
+              <h3 class="font-extrabold mt-3 break-all">${item.id}</h3>
+              <p class="text-sm mt-2"><span class="font-bold">Doctor:</span> ${item.doctor_id || "Unassigned"}</p>
+              <p class="text-sm"><span class="font-bold">Symptoms:</span> ${item.symptoms || "Not provided"}</p>
+              <p class="text-sm"><span class="font-bold">Triage:</span> ${item.triage_score || 0}</p>
+            </div>
+            <div class="grid grid-cols-2 lg:grid-cols-1 gap-2 min-w-44">
+              <button class="btn btn-ok" type="button" onclick="confirmPayment('${item.id}')">Confirm Payment</button>
+              <button class="btn btn-primary" type="button" onclick="issueToken('${item.id}')">Issue Token</button>
+              <button class="btn btn-warn" type="button" onclick="markNoShow('${item.id}')">No-show</button>
+              <button class="btn btn-danger" type="button" onclick="cancelAppointment('${item.id}')">Cancel</button>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+
+    async function loadQueue() {
+      queueList.innerHTML = "<div class='text-slate-500'>Loading...</div>";
+      try {
+        const data = await api("/api/receptionist/queue/status");
+        document.querySelector("#queueSummary").textContent = `${data.total_queued} active token(s)`;
+        if (!data.queue.length) {
+          queueList.innerHTML = "<div class='p-4 bg-slate-50 rounded-lg text-slate-500'>Queue is empty.</div>";
+          return;
+        }
+        queueList.innerHTML = data.queue.map((item) => `
+          <div class="border border-slate-200 rounded-lg p-3 bg-slate-50">
+            <div class="flex items-center justify-between gap-2">
+              <strong>#${item.position} Token ${item.token_number || "-"}</strong>
+              ${item.is_priority ? "<span class='text-xs font-extrabold text-red-700'>Priority</span>" : ""}
+            </div>
+            <p class="text-sm text-slate-600 mt-1">${item.patient_name}</p>
+            <p class="text-xs text-slate-500">${item.doctor_name} | ${item.status}</p>
+          </div>
+        `).join("");
+      } catch (err) {
+        queueList.innerHTML = `<div class="p-4 bg-red-50 text-red-700 rounded-lg">${err.message}</div>`;
+      }
+    }
+
+    async function confirmPayment(id) {
+      try {
+        await api(`/api/receptionist/confirm_payment/${id}`, { method: "POST", body: "{}" });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function issueToken(id) {
+      try {
+        await api(`/api/receptionist/issue_token/${id}`, {
+          method: "POST",
+          body: JSON.stringify({ is_priority: false, priority_score: 0 })
+        });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function markNoShow(id) {
+      if (!confirm("Mark this appointment as no-show?")) return;
+      try {
+        await api(`/api/receptionist/no_show/${id}`, { method: "POST", body: "{}" });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function cancelAppointment(id) {
+      if (!confirm("Cancel this appointment?")) return;
+      try {
+        await api(`/api/receptionist/cancel/${id}`, { method: "POST", body: "{}" });
+        await refreshAll();
+      } catch (err) {
+        alert(err.message);
+      }
+    }
+
+    async function refreshAll() {
+      await Promise.all([loadAppointments(), loadQueue()]);
+    }
+
+    document.querySelector("#loadDateBtn").addEventListener("click", loadAppointments);
+    document.querySelector("#refreshBtn").addEventListener("click", refreshAll);
+    document.querySelector("#logoutBtn").addEventListener("click", () => {
+      localStorage.removeItem(tokenKey);
+      disconnectSocket();
+      location.reload();
+    });
+
+    boot();
+  </script>
+</body>
+</html>
